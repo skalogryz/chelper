@@ -24,9 +24,17 @@ end;
 procedure DumpExp(exp: TExp; const prefix: string = '');
 begin
   if not Assigned(exp) then Exit;
-  DumpExp(exp.left,prefix+'  ');
+  if exp.dir = edTernary then begin
+    DumpExp(exp.main,prefix+'  ');
+    writeln(prefix,exp.op);
+  end;
+  if Assigned(exp.Left) then DumpExp(exp.left,prefix+'  ');
   if exp.dir = edValue then writeln(prefix, exp.val)
-  else writeln(prefix, exp.op);
+  else begin
+    if exp.dir = edTernary
+      then writeln(prefix, ':')
+      else writeln(prefix, exp.op);
+  end;
   DumpExp(exp.right,prefix+'  ');
 end;
 
