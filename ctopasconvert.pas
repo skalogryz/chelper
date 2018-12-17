@@ -25,7 +25,7 @@ interface
 uses
   Classes, SysUtils,
   cparsertypes, TextParsingUtils, codewriter, cparserutils
-  ,objcparsing, cconvlog;
+  ,objcparsing, cconvlog, cparserexp;
 
 var
   DoDebugEntities : Boolean = False; // write parsed entities names if no converter found!?
@@ -156,8 +156,14 @@ type
     destructor Destroy; override;
   end;
 
+{ Initiialized the TParseInput structure
+  inp - the structure that holds all the objects used for parsing (parser and Macro's handler)
+  parseAll - should the entire text be parsed (only the first entity is parsed overwise) }
 procedure InitCParserInput(var inp: TParseInput; parseAll: Boolean = true);
+
+{ Frees all classes located at TParseInput structure}
 procedure FreeCParserInput(var inp: TParseInput);
+
 procedure LoadDefines(inp: TParseInput; const definesCode: string);
 procedure ResetText(const inp: TParseInput; const txt: string);
 function ParseCEntities(const inp: TParseInput; entList: TList; var outputInfo: TParseOutput): Boolean;
@@ -588,6 +594,7 @@ begin
   inp.mmaker.ifCondProc:=true;
   inp.mmaker.allowRedfine:=false; // todo: it should be true!
   p.OnPrecompile:=inp.mmaker.Precompiler;
+  p.ExpParseProc := cparserexp.ParseCExprEx;
 
   inp.parser:=p;
   inp.alltext:=parseAll;
@@ -708,9 +715,10 @@ end;
 procedure FreeCParserInput(var inp: TParseInput);
 begin
   inp.mmaker.Free;
+  inp.mmaker:=nil;
   inp.parser.MacroHandler.Free;
   inp.parser.Free;
-  //inp.stopcmt.Free;
+  inp.parser:=nil;
 end;
 
 function CEntitiesToPas(const originText: string;  entList: TList; cfg: TConvertSettings): AnsiString;

@@ -5,42 +5,13 @@ interface
 uses
   SysUtils, cparsertypes;
 
-type
-  TIdentType = (itIdent, itIndex, itFuncCall, itField, itSubSel);
 
-  TExpDir = (    // Expression Direction describes what relative fields should be initialzed
-                 // for the expression node.
-      edValue    // "none" - this should be a leaf of the expression graph
-    , edPrefix   // "right"
-    , edPostfix  // "left" for the host. "inner" is used for arrays and function calls
-                 //   "left" ( "inner" )
-    , edInfix    // "left" and "right" are mandatory. used for all binary operators!
-    , edTernary  // used for ? operator. "main", "left", "right" are used, "main" ? "left" : "right"
-    , edSequence // used for , operator (and parameters). "left" and "right" are used
-  );
-
-  TExp = class(TObject)
-    left    : TExp;
-    right   : TExp;
-    main    : TExp;
-    inner   : TExp;
-    pr      : Integer;
-    op      : string;
-    val     : string;
-    dir     : TExpDir;
-    casttype  : string;
-    identtype : TIdentType;
-    constructor Create(apr: Integer; const aop: string =''; adir: TExpDir = edInfix);
-  end;
 
 const
   CIdentClose : array [TIdentType] of string = ('', ']',')', '', '');
   CIdentOpen  : array [TIdentType] of string = ('', '[','(', '.', '->');
 
 function ParseCExprEx(p: TTextParser): TExp;
-
-function ValuatePreprocExp(exp: TExp; macros: TCMacroHandler): Integer; overload;
-function ValuatePreprocExp(const exp: string; macros: TCMacroHandler): Integer; overload;
 
 function isCTypeCast(exp: TExp; tinfo: TCTypeInfo): Boolean;
 
@@ -72,7 +43,7 @@ begin
   Result:=hasType;
 end;
 
-function Rotate(core: TExp): TExp;
+function _Rotate(core: TExp): TExp;
 begin
   if Assigned(core.right) and (core.right.dir<>edValue) and (core.right.pr>=core.pr) then
   begin
@@ -81,7 +52,7 @@ begin
     Result.left:=core;
 
     // additional rotate
-    Result.left:=Rotate(core);
+    Result.left:=_Rotate(core);
   end else
     Result:=core;
 end;
@@ -162,7 +133,7 @@ begin
         Result:=TExp.Create(3, 'typecast', edInfix);
         Result.inner:=ct;
         Result.right:=ParseCExprEx(p);
-        Result:=Rotate(REsult);
+        //Result:=Rotate(REsult);
       end;
     end else if (p.Token='sizeof') or (p.Token='++') or (p.Token='--')
       or ((length(p.Token) = 1) and (p.Token[1] in ['&','*','~','!','-','+']))
@@ -170,7 +141,7 @@ begin
       Result:=TExp.Create(3, p.Token, edPrefix);
       p.NextToken;
       Result.right:=ParseCExprEx(p);
-      Result:=Rotate(Result);
+      //Result:=Rotate(Result);
     end
   end else
     Result:=exp;
@@ -180,224 +151,158 @@ function level5(p: TTextParser): TExp;
 var
   e : TExp;
 begin
-  e:=level3(p);
-  if Assigned(e) then begin
-    if (p.TokenType = tt_Symbol) and ( (length(p.Token)=1) and (p.Token[1] in ['*','/','%'])) then
-    begin
-      Result:=TExp.Create(5, p.Token, edInfix);
-      p.NextToken;
-      Result.left:=e;
-      Result.right:=ParseCExprEx(p);
-      Result:=Rotate(Result);
-    end else
-      Result:=e;
-  end else
-    Result:=nil;
+  Result :=level3(p);
+  while Assigned(Result) and (p.TokenType = tt_Symbol) and ( (length(p.Token)=1) and (p.Token[1] in ['*','/','%'])) do begin
+    e:=Result;
+    Result:=TExp.Create(5, p.Token, edInfix);
+    p.NextToken;
+    Result.left:=e;
+    Result.right:=level3(p);
+  end;
 end;
 
 function level6(p: TTextParser): TExp;
 var
   e : TExp;
 begin
-  e:=level5(p);
-  if Assigned(e) then begin
-    if (p.TokenType = tt_Symbol) and ( (length(p.Token)=1) and (p.Token[1] in ['+','-'])) then
-    begin
-      Result:=TExp.Create(6, p.Token, edInfix);
-      p.NextToken;
-      Result.left:=e;         // a * b + c
-      Result.right:=ParseCExprEx(p);
-      Result:=Rotate(Result);
-    end else
-      Result:=e;
-  end else
-    Result:=nil;
+  Result:=level5(p);
+  while Assigned(Result) and  (p.TokenType = tt_Symbol) and ( (length(p.Token)=1) and (p.Token[1] in ['+','-'])) do begin
+    e:=Result;
+    Result:=TExp.Create(6, p.Token, edInfix);
+    p.NextToken;
+    Result.left:=e;         // a * b + c
+    Result.right:=level5(p);
+  end;
 end;
 
 function level7(p: TTextParser): TExp;
 var
   e : TExp;
 begin
-  e:=level6(p);
-  if Assigned(e) then begin
-    if (p.TokenType = tt_Symbol) and ( (p.Token = '<<') or (p.Token='>>')) then
-    begin
-      Result:=TExp.Create(7, p.Token, edInfix);
-      p.NextToken;
-      Result.left:=e;
-      Result.right:=ParseCExprEx(p);
-      Result:=Rotate(Result);
-    end else
-      Result:=e;
-  end else
-    Result:=nil;
+  Result:=level6(p);
+  while Assigned(Result) and (p.TokenType = tt_Symbol) and ( (p.Token = '<<') or (p.Token='>>')) do begin
+    e:=Result;
+    Result:=TExp.Create(7, p.Token, edInfix);
+    p.NextToken;
+    Result.left:=e;
+    Result.right:=level6(p);
+  end;
 end;
 
 function level8(p: TTextParser): TExp;
 var
   e : TExp;
-  tk : string;
 begin
-  e:=level7(p);
-  if Assigned(e) then begin
-    tk:=p.Token;
-    if (p.TokenType = tt_Symbol) and ((tk='<') or (tk='<=') or (tk='>=') or (tk='>')) then
-    begin
-      Result:=TExp.Create(8, p.Token, edInfix);
-      p.NextToken;
-      Result.left:=e;
-      Result.right:=ParseCExprEx(p);
-      Result:=Rotate(Result);
-    end else
-      Result:=e;
-  end else
-    Result:=nil;
+  Result:=level7(p);
+  while Assigned(Result) and (p.TokenType = tt_Symbol) and ((p.Token='<') or (p.Token='<=') or (p.Token='>=') or (p.Token='>')) do begin
+    e:=Result;
+    Result:=TExp.Create(8, p.Token, edInfix);
+    p.NextToken;
+    Result.left:=e;
+    Result.right:=level7(p);
+  end;
 end;
 
 function level9(p: TTextParser): TExp;
 var
   e : TExp;
-  tk : string;
 begin
-  e:=level8(p);
-  if Assigned(e) then begin
-    tk:=p.Token;
-    if (p.TokenType = tt_Symbol) and ((tk='==') or (tk='!=')) then
-    begin
-      Result:=TExp.Create(9, p.Token, edInfix);
-      Result.left:=e;
-      p.NextToken;
-      Result.right:=ParseCExprEx(p);
-      Result:=Rotate(Result);
-    end else
-      Result:=e;
-  end else
-    Result:=nil;
+  Result:=level8(p);
+  while Assigned(Result) and (p.TokenType = tt_Symbol) and ((p.Token='==') or (p.Token='!=')) do begin
+    e := Result;
+    Result:=TExp.Create(9, p.Token, edInfix);
+    Result.left:=e;
+    p.NextToken;
+    Result.right:=level8(p);
+  end;
 end;
 
 function level10(p: TTextParser): TExp;
 var
   e : TExp;
-  tk : string;
 begin
-  e:=level9(p);
-  if Assigned(e) then begin
-    tk:=p.Token;
-    if (p.TokenType = tt_Symbol) and (tk='&') then
-    begin
-      Result:=TExp.Create(10, p.Token, edInfix);
-      Result.left:=e;
-      p.NextToken;
-      Result.right:=ParseCExprEx(p);
-      Result:=Rotate(Result);
-    end else
-      Result:=e;
-  end else
-    Result:=nil;
+  Result:=level9(p);
+  while Assigned(Result) and (p.TokenType = tt_Symbol) and (p.Token='&') do begin
+    e:=Result;
+    Result:=TExp.Create(10, p.Token, edInfix);
+    Result.left:=e;
+    p.NextToken;
+    Result.right:=level9(p);
+  end;
 end;
 
 function level11(p: TTextParser): TExp;
 var
   e : TExp;
-  tk : string;
 begin
-  e:=level10(p);
-  if Assigned(e) then begin
-    tk:=p.Token;
-    if (p.TokenType = tt_Symbol) and (tk='^') then
-    begin
-      Result:=TExp.Create(11, p.Token, edInfix);
-      Result.left:=e;
-      p.NextToken;
-      Result.right:=ParseCExprEx(p);
-      Result:=Rotate(Result);
-    end else
-      Result:=e;
-  end else
-    Result:=nil;
+  Result:=level10(p);
+  while Assigned(Result) and (p.TokenType = tt_Symbol) and (p.Token='^') do begin
+    e := Result;
+    Result:=TExp.Create(11, p.Token, edInfix);
+    Result.left:=e;
+    p.NextToken;
+    Result.right:=level10(p);
+  end;
 end;
 
 function level12(p: TTextParser): TExp;
 var
   e : TExp;
-  tk : string;
 begin
-  e:=level11(p);
-  if Assigned(e) then begin
-    tk:=p.Token;
-    if (p.TokenType = tt_Symbol) and (tk='|') then
-    begin
-      Result:=TExp.Create(12, p.Token, edInfix);
-      Result.left:=e;
-      p.NextToken;
-      Result.right:=ParseCExprEx(p);
-      Result:=Rotate(Result);
-    end else
-      Result:=e;
-  end else
-    Result:=nil;
+  Result:=level11(p);
+  while Assigned(Result) and (p.TokenType = tt_Symbol) and (p.Token='|') do begin
+    e := Result;
+    Result:=TExp.Create(12, p.Token, edInfix);
+    Result.left:=e;
+    p.NextToken;
+    Result.right:=level11(p);
+  end;
 end;
 
 function level13(p: TTextParser): TExp;
 var
-  e : TExp;
-  tk : string;
+  e  : TExp;
 begin
-  e:=level12(p);
-  if Assigned(e) then begin
-    tk:=p.Token;
-    if (p.TokenType = tt_Symbol) and (tk='&&') then
-    begin
-      Result:=TExp.Create(13, p.Token, edInfix);
-      Result.left:=e;
-      p.NextToken;
-      Result.right:=ParseCExprEx(p);
-      Result:=Rotate(Result);
-    end else
-      Result:=e;
-  end else
-    Result:=nil;
+  Result:=level12(p);
+  while Assigned(Result) and (p.TokenType = tt_Symbol) and (p.Token='&&') do begin
+    e := Result;
+    Result:=TExp.Create(13, p.Token, edInfix);
+    Result.left:=e;
+    p.NextToken;
+    Result.right:=level12(p);
+  end;
 end;
 
 function level14(p: TTextParser): TExp;
 var
   e : TExp;
-  tk : string;
 begin
-  e:=level13(p);
-  if Assigned(e) then begin
-    tk:=p.Token;
-    if (p.TokenType = tt_Symbol) and (tk='||') then
-    begin
-      Result:=TExp.Create(14, p.Token, edInfix);
-      Result.left:=e;
-      p.NextToken;
-      Result.right:=ParseCExprEx(p);
-      Result:=Rotate(Result);
-    end else
-      Result:=e;
-  end else
-    Result:=nil;
+  Result:=level13(p);
+  while Assigned(Result) and (p.TokenType = tt_Symbol) and (p.Token='||') do begin
+    e := Result;
+    Result:=TExp.Create(14, p.Token, edInfix);
+    Result.left:=e;
+    p.NextToken;
+    Result.right:=level13(p);
+    //Result:=Rotate(Result);
+  end;
 end;
 
 function level15(p: TTextParser): TExp;
 var
   e   : TExp;
-  tk  : string;
 begin
-  e:=level14(p);
-  if Assigned(e) then begin
-    if p.Token='?' then begin
-      p.NextToken;
-      Result:=TExp.Create(15, '?', edTernary);
-      Result.main:=e;
-      Result.left:=ParseCExprEx(p);
-      if p.Token = ':' then p.NextToken;
-      Result.right:=ParseCExprEx(p);
-    end else
-      Result:=e;
-  end else
-    Result:=nil;
+  Result:=level14(p);
+  while Assigned(result) and (p.Token='?') do
+  begin
+    p.NextToken;
+    e:=Result;
+    Result:=TExp.Create(15, '?', edTernary);
+    Result.main:=e;
+    Result.left:=level14(p);
+    if p.Token = ':' then p.NextToken;
+    Result.right:=level14(p);
+  end;
 end;
 
 function level16(p: TTextParser): TExp;
@@ -405,22 +310,18 @@ var
   tk  : string;
   e   : TExp;
 begin
-  e:=level15(p);
-  if Assigned(e) then begin
-    tk:=p.Token;
-    if (tk='=')
+  Result:=level15(p);
+  while Assigned(Result) and ((tk='=')
        or (tk='+=') or (tk='-=') or (tk='*=') or (tk='/=')
        or (tk='%=') or (tk='<<=') or (tk='>>=') or (tk='&=')
-       or (tk='^=') or (tk='|=') then
-    begin
-      Result:=TExp.Create(16, tk, edInfix);
-      Result.right:=e;
-      p.NextToken;
-      Result.left:=ParseCExprEx(p);
-    end else
-      Result:=e;
-  end else
-    Result:=nil;
+       or (tk='^=') or (tk='|=')) do
+  begin
+    e:=Result;
+    Result:=TExp.Create(16, tk, edInfix);
+    Result.right:=e;
+    p.NextToken;
+    Result.left:=level15(p);
+  end;
 end;
 
 function level17(p: TTextParser): TExp;
@@ -429,113 +330,18 @@ var
   e   : TExp;
 begin
   Result:=level16(p);
-  if Assigned(Result) and (p.TokenType=tt_Symbol) and (p.Token=',') then begin
+  while Assigned(Result) and (p.TokenType=tt_Symbol) and (p.Token=',') do begin
     e:=Result;
     p.NextToken;
     Result:=TExp.Create(17, ',', edSequence);
     Result.left:=e;
-    Result.right:=ParseCExprEx(p);
+    Result.right:=level16(p);
   end;
 end;
 
 function ParseCExprEx(p: TTextParser): TExp;
 begin
   Result:=level17(p);
-end;
-
-{ TExp }
-
-constructor TExp.Create(apr: Integer; const aop: string; adir: TExpDir = edInfix);
-begin
-  inherited Create;
-  pr:=apr;
-  op:=aop;
-  dir:=adir;
-end;
-
-
-function PreProcVal(exp: TExp; m: TCMacroHandler): Integer;
-var
-  code  : Integer;
-  l, r  : Integer;
-  lt    : TExp;
-  rt    : TExp;
-  nm    : string;
-  s     : string;
-  v     : string;
-const
-  IntRes : array [boolean] of integer = (0,1);
-begin
-  Result:=0;
-
-  if (exp.identtype = itFuncCall) and (exp.dir=edPostfix) then begin
-    if Assigned(exp.left)  and (exp.left.identtype=itIdent)  then nm:=exp.left.val
-    else nm:='';
-    if Assigned(exp.inner) and (exp.inner.identtype=itIdent) then s:=exp.inner.val
-    else s:='';
-    if (nm='defined') and Assigned(m) then Result:=IntRes[ m.isMacroDefined(s)]
-    else Result:=0;
-  end else if exp.dir = edPrefix then begin
-    r:=PreProcVal(exp.right, m);
-    //writeln('koko! ', PtrUInt(exp.right));
-    if exp.op='!' then begin
-      if r = 0 then Result:=1
-      else Result:=0;
-    end;
-    // it should be
-  end else if exp.dir = edInfix then begin
-    l:=PreProcVal(exp.left,m);
-    r:=PreProcVal(exp.right,m);
-    if exp.op = '+' then Result:=l+r
-    else if exp.op = '-' then Result:=l-r
-    else if exp.op = '/' then Result:=l div r
-    else if exp.op = '%' then Result:=l mod r
-    else if exp.op = '*' then Result:=l * r
-    else if exp.op = '&' then Result:=l and r
-    else if exp.op = '|' then Result:=l or r
-    else if exp.op = '<<' then Result:=l shr r
-    else if exp.op = '>>' then Result:=l shl r
-    else if exp.op = '|' then Result:=l or r
-    else if exp.op = '&' then Result:=l and r
-    else if exp.op = '||' then Result:=IntRes[(l or r) > 0]
-    else if exp.op = '&&' then Result:=IntRes[(l and r) > 0]
-    else if exp.op = '==' then Result:=IntRes[l = r]
-    else if exp.op = '!=' then Result:=IntRes[l <> r]
-    else if exp.op = '>=' then Result:=IntRes[l >= r]
-    else if exp.op = '<=' then Result:=IntRes[l <= r]
-    else if exp.op = '>' then Result:=IntRes[l > r]
-    else if exp.op = '<' then Result:=IntRes[l < r];
-  end else begin
-    v:=trim(exp.val);
-    if Assigned(m) and (m.isMacroDefined(v)) then v:=m.GetMacroReplaceStr(v);
-    Val(v, Result, code);
-  end;
-end;
-
-function ValuatePreprocExp(exp: TExp; macros: TCMacroHandler): Integer;
-begin
-  Result:=PreProcVal(Exp, macros);
-end;
-
-function ValuatePreprocExp(const exp: string; macros: TCMacroHandler): Integer;
-var
-  prs : TTextParser;
-  expObj : TExp;
-begin
-  prs := CreateCParser(exp, false);
-  try
-    //no macros are defined for pre-compiler, they would be used in evaluation instead!
-    //prs.MacroHandler:=macros;
-    if prs.NextToken then begin
-      expObj:=ParseCExprEx(prs);
-      if Assigned(expObj)
-        then Result:=ValuatePreprocExp(expObj, macros)
-        else Result:=0;
-    end else
-      Result:=0;
-  finally
-    prs.Free;
-  end;
 end;
 
 end.

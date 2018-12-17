@@ -39,6 +39,34 @@ type
     Close      : AnsiString;
   end;
 
+  TIdentType = (itIdent, itIndex, itFuncCall, itField, itSubSel);
+
+  TExpDir = (    // Expression Direction describes what relative fields should be initialzed
+                 // for the expression node.
+      edValue    // "none" - this should be a leaf of the expression graph
+    , edPrefix   // "right"
+    , edPostfix  // "left" for the host. "inner" is used for arrays and function calls
+                 //   "left" ( "inner" )
+    , edInfix    // "left" and "right" are mandatory. used for all binary operators!
+    , edTernary  // used for ? operator. "main", "left", "right" are used, "main" ? "left" : "right"
+    , edSequence // used for , operator (and parameters). "left" and "right" are used
+  );
+
+  TExp = class(TObject)
+    left    : TExp;
+    right   : TExp;
+    main    : TExp;
+    inner   : TExp;
+    pr      : Integer;
+    op      : string;
+    val     : string;
+    dir     : TExpDir;
+    casttype  : string;
+    identtype : TIdentType;
+    constructor Create(apr: Integer; const aop: string =''; adir: TExpDir = edInfix); overload;
+    constructor Create(const aop: string =''; adir: TExpDir = edInfix); overload;
+  end;
+
   { TTokenTable }
 
   TTokenTable = class(TObject)
@@ -107,6 +135,9 @@ type
     procedure RegisterTypeName(const nm: string);
   end;
 
+
+  TExpressionProc = function (p: TTextParser): TExp;
+
   { TTextParser }
 
   TTextParser = class(TObject)
@@ -138,6 +169,7 @@ type
     Errors        : TStringList;
     MacroHandler  : TCMacroHandler;
     CTypeInfo     : TCTypeInfo;
+    ExpParseProc  : TExpressionProc;
 
     UseCommentEntities     : Boolean;
     UsePrecompileEntities  : Boolean;
@@ -262,6 +294,7 @@ type
     Tokens  : array of TExpPart;
     Count   : Integer;
 
+    exp     : TExp;
     procedure PushToken(const AToken: AnsiString; ATokenType: TTokenType);
   end;
 
@@ -327,6 +360,7 @@ function ParseCNamePart(Parser: TTextParser): TNamePart;  // default ParseNamePa
 
 // both ParseCExpr and ParseCBodyConent are not checking validity of the body syntax
 function ParseCExpr(Parser: TTextParser; CommaIsEnd: Boolean=False): TExpression;
+function ParseCExpr2(Parser: TTextParser; CommaIsEnd: Boolean=False): TExpression;
 // collects all tokens in the body excluducing opening and closing {  }
 function ParseCBodyConent(Parser: TTextParser): TExpression;
 
@@ -445,10 +479,98 @@ procedure ParseDefine(const s: string; def: TCPrepDefine);
 
 function isStdCType(const s: string): boolean;
 
+function ValuatePreprocExp(exp: TExp; macros: TCMacroHandler): Integer; overload;
+function ValuatePreprocExp(const exp: string; macros: TCMacroHandler): Integer; overload;
+
 implementation
 
 uses
-  cparserexp; // todo: expression parsing should in the same unit!
+  cparserexp;
+
+function PreProcVal(exp: TExp; m: TCMacroHandler): Integer;
+var
+  code  : Integer;
+  l, r  : Integer;
+  lt    : TExp;
+  rt    : TExp;
+  nm    : string;
+  s     : string;
+  v     : string;
+const
+  IntRes : array [boolean] of integer = (0,1);
+begin
+  Result:=0;
+
+  if (exp.identtype = itFuncCall) and (exp.dir=edPostfix) then begin
+    if Assigned(exp.left)  and (exp.left.identtype=itIdent)  then nm:=exp.left.val
+    else nm:='';
+    if Assigned(exp.inner) and (exp.inner.identtype=itIdent) then s:=exp.inner.val
+    else s:='';
+    if (nm='defined') and Assigned(m) then Result:=IntRes[ m.isMacroDefined(s)]
+    else Result:=0;
+  end else if exp.dir = edPrefix then begin
+    r:=PreProcVal(exp.right, m);
+    //writeln('koko! ', PtrUInt(exp.right));
+    if exp.op='!' then begin
+      if r = 0 then Result:=1
+      else Result:=0;
+    end;
+    // it should be
+  end else if exp.dir = edInfix then begin
+    l:=PreProcVal(exp.left,m);
+    r:=PreProcVal(exp.right,m);
+    if exp.op = '+' then Result:=l+r
+    else if exp.op = '-' then Result:=l-r
+    else if exp.op = '/' then Result:=l div r
+    else if exp.op = '%' then Result:=l mod r
+    else if exp.op = '*' then Result:=l * r
+    else if exp.op = '&' then Result:=l and r
+    else if exp.op = '|' then Result:=l or r
+    else if exp.op = '<<' then Result:=l shr r
+    else if exp.op = '>>' then Result:=l shl r
+    else if exp.op = '|' then Result:=l or r
+    else if exp.op = '&' then Result:=l and r
+    else if exp.op = '||' then Result:=IntRes[(l or r) > 0]
+    else if exp.op = '&&' then Result:=IntRes[(l and r) > 0]
+    else if exp.op = '==' then Result:=IntRes[l = r]
+    else if exp.op = '!=' then Result:=IntRes[l <> r]
+    else if exp.op = '>=' then Result:=IntRes[l >= r]
+    else if exp.op = '<=' then Result:=IntRes[l <= r]
+    else if exp.op = '>' then Result:=IntRes[l > r]
+    else if exp.op = '<' then Result:=IntRes[l < r];
+  end else begin
+    v:=trim(exp.val);
+    if Assigned(m) and (m.isMacroDefined(v)) then v:=m.GetMacroReplaceStr(v);
+    Val(v, Result, code);
+  end;
+end;
+
+function ValuatePreprocExp(exp: TExp; macros: TCMacroHandler): Integer;
+begin
+  Result:=PreProcVal(Exp, macros);
+end;
+
+function ValuatePreprocExp(const exp: string; macros: TCMacroHandler): Integer;
+var
+  prs : TTextParser;
+  expObj : TExp;
+begin
+  prs := CreateCParser(exp, false);
+  try
+    //no macros are defined for pre-compiler, they would be used in evaluation instead!
+    //prs.MacroHandler:=macros;
+    if prs.NextToken then begin
+      expObj:=ParseCExprEx(prs);
+      if Assigned(expObj)
+        then Result:=ValuatePreprocExp(expObj, macros)
+        else Result:=0;
+    end else
+      Result:=0;
+  finally
+    prs.Free;
+  end;
+end;
+
 
 function isStdCType(const s: string): boolean;
 begin
@@ -1869,6 +1991,13 @@ begin
   Result:=(t=']') or (t=';') or (t=')') or (CommaIsEnd and (t=',')) or (t='}');
 end;
 
+function ParseCExpr2(Parser: TTextParser; CommaIsEnd: Boolean=False): TExpression;
+begin
+  Result := TExpression.Create(Parser.Index);
+  if Assigned(Parser.ExpParseProc) then
+    Result.exp := Parser.ExpParseProc(Parser);
+end;
+
 function ParseCExpr(Parser: TTextParser; CommaIsEnd: Boolean=False): TExpression;
 var
   x   : TExpression;
@@ -2061,8 +2190,9 @@ begin
       // constant or initializing value
       if Parser.Token='=' then begin
         Parser.NextToken;
-        if Assigned(Name) then
-          Name.valexp:=ParseCExpr(Parser,AllowMultipleNames);
+        if Assigned(Name) then begin
+          Name.valexp:=ParseCExpr2(Parser,AllowMultipleNames);
+        end;
       end;
 
       if not AllowMultipleNames then begin
@@ -2657,6 +2787,21 @@ begin
   ftypeNames.Add(nm);
 end;
 
+
+{ TExp }
+
+constructor TExp.Create(apr: Integer; const aop: string; adir: TExpDir = edInfix);
+begin
+  inherited Create;
+  pr:=apr;
+  op:=aop;
+  dir:=adir;
+end;
+
+constructor TExp.Create(const aop: string =''; adir: TExpDir = edInfix);
+begin
+  Create(0, aop, adir);
+end;
 
 initialization
   _ParseNextEntity:=@ParseNextCEntity;
